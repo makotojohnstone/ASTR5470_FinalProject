@@ -8,6 +8,7 @@ import astropy
 from photutils.psf import CircularGaussianPRF
 import matplotlib.colors as colors
 import cv2
+import csv
 from itertools import combinations
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
@@ -186,8 +187,10 @@ def simulate_sne(rate, radius_pc, lumin_range, criteria, FOV = 200, N=500, dist=
     if visualize: ### A quick visual
         fig = plt.figure(figsize=(8,8))
         plt.imshow(data, norm=colors.LogNorm(vmin=min(pop.lumin)/1000, vmax=max(pop.lumin), clip=True), cmap='hot', extent=[-N/20, N/20, -N/20, N/20])
-        plt.colorbar(label='Luminosity')
+        plt.colorbar(label='1.4 GHz Luminosity [1e24 erg/s/Hz)')
         plt.title('Simulated SNe/SNR population')
+        plt.xlabel('[parsecs]')
+        plt.ylabel('[parsecs]')
         fig.savefig('./Simulated_pop.png', bbox_inches='tight')
 
     ### Add apertures and measure luminosities for each
@@ -202,7 +205,7 @@ def simulate_sne(rate, radius_pc, lumin_range, criteria, FOV = 200, N=500, dist=
     return total_lumin, count, len(apertures), pop
 
 
-def run_mc(iterations, n_jobs, rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist='exp', scale_height_pc = 100, step_pc=10, visualize=False):
+def run_mc(iterations, n_jobs, rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist='exp', scale_height_pc = 100, step_pc=10, visualize=False, savecsv=False):
     ''
     ''
     results = Parallel(n_jobs=n_jobs)(delayed(simulate_sne)(rate=rate, radius_pc = radius_pc, lumin_range=lumin_range, criteria=criteria, FOV=FOV, N=N, dist='exp', scale_height_pc=scale_height_pc, step_pc=step_pc, visualize=False) for x in range(iterations))
@@ -211,6 +214,13 @@ def run_mc(iterations, n_jobs, rate, radius_pc, lumin_range, criteria, FOV = 200
     count = [item[1] for item in results]
     apertures = [item[2] for item in results]
     population = [item[3] for item in results]
+
+    if savecsv:
+        with open('output.csv', 'w', newline='') as file:
+            writer = csv.writer(file)
+            # Wrap each item in its own list to make it a row
+            for num in count:
+                writer.writerow([num])
 
     total_luminosities_cat = np.concatenate(total_luminosities)
     return total_luminosities_cat, count, apertures, population
