@@ -8,7 +8,6 @@ import astropy
 from photutils.psf import CircularGaussianPRF
 import matplotlib.colors as colors
 import cv2
-import sampling as samp
 from itertools import combinations
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
@@ -32,15 +31,8 @@ class SNe_pop:
         PDF = PDF/np.sum(PDF) #normalize the probability distribution
         self.lumin = np.random.choice(lumin_range, size=self.n, replace=True, p=PDF)
 
-    def diameter(self, A=1.15e12, alpha=-4/9):
+    def diameter(self, A=40, alpha=-4/9):
         self.diam = A * self.lumin**alpha + np.random.normal(0, 0.2, self.n)
-
-        mask = (self.diam < 0.2) | (self.diam > 2)
-        while np.any(mask):
-            n_bad = np.sum(mask)
-            new_vals = A * self.lumin[mask]**alpha + np.random.normal(0, 0.1, n_bad)
-            self.diam[mask] = new_vals
-            mask = (self.diam < 0.2) | (self.diam > 2)
 
     def position(self, N, scale_height=None, dist = 'exp'):
         '''
@@ -63,22 +55,8 @@ class SNe_pop:
                 # Determine position in cartesian coordinates
                 x = N/2 - r * np.cos(theta)
                 y = N/2 - r * np.sin(theta)
-
-                pos = np.array([[x[i], y[i]] for i in range(self.n)])
-                unique_pos = np.unique(pos, axis = 0)
-
-                ## Make sure all values are unique (highly improbable that the same position is pulled twice)
-                while len(unique_pos) != self.n:
-                    r = np.random.exponential(scale=scale_height, size=1)
-                    theta = np.random.uniform(0, 2 * np.pi, 1)
                     
-                    np.append(x, N/2 - r * np.cos(theta))
-                    np.append(y, N/2 - r * np.sin(theta))
-
-                    pos = np.array([[x[i], y[i]] for i in range(self.n)])
-                    unique_pos = np.unique(pos, axis = 0)
-                    
-                self.x, self.y = unique_pos[:,0], unique_pos[:,1]
+                self.x, self.y = x, y
 
         elif dist == 'gauss':
             x, y = np.random.normal(loc=N/2, scale=N/6, size=(2, self.n))
@@ -87,38 +65,13 @@ class SNe_pop:
             for i in range(self.n):
                 while np.any(pos[i] < 0) or np.any(pos[i] > N): #make sure the position is in the FOV
                     pos = np.delete(pos, i, axis=0)
-                    pos = np.append(pos, np.random.normal(loc=N/2, scale=N/6, size=(2, 1)))   
-
-            unique_pos = np.unique(pos, axis = 0) #check if every value is unique
-            while len(unique_pos) != self.n: 
-                new_value = np.array([-1, -1])
-                while np.any(new_value < 0) or np.any(new_value > N): #confirm that it's in the field of view
-                    new_value = np.random.normal(loc=N/2, scale=N/6, size=(2, 1))
-                
-                pos = np.append(pos, new_value) #add a new one
-                unique_pos = np.unique(pos, axis = 0)
-                
-        
-            for i in range(self.n):
-                while pos[i] in np.delete(pos, i, axis=0): #if the element is repeated
-                    pos = np.delete(pos, i, axis=0) #delete the repeating element
-                    pos = np.append(pos, np.random.normal(loc=N/2, scale=N/6, size=(2, 1))) #add a new one
-                                    
-                while np.any(pos[i] < 0) or np.any(pos[i] > N): #make sure the position is in the FOV
-                    pos = np.delete(pos, i, axis=0)
-                    pos = np.append(pos, np.random.normal(loc=N/2, scale=N/6, size=(2, 1)))    
+                    pos = np.append(pos, np.random.normal(loc=N/2, scale=N/6, size=(1, 2)), axis=0)  
 
             self.x, self.y = pos[:,0], pos[:,1]
             
         elif dist == 'uniform':
             pos = np.random.uniform(0, N, size=(self.n, 2))
-            unique_pos = np.unique(pos, axis = 0) #check if every value is unique
-            
-            while len(unique_pos) != self.n: 
-                pos = np.append(pos, np.random.uniform(0, N, size=(1, 2))) #add a new one
-                unique_pos = np.unique(pos, axis = 0)
-
-            self.x, self.y = unique_pos[:,0], unique_pos[:,1]
+            self.x, self.y = pos[:,0], pos[:,1]
 
         else:
             print('Must select between exponential disk (exp), gaussian (gauss), or uniform distribution (uniform)')
@@ -146,14 +99,53 @@ def aperture_pos(width_px, height_px, radius_px, step_px=15):
     return positions
 
 def check_overlap(centers, radius_px):
-    if len(centers) == 0:
-        return 0
+    n = len(centers)
 
-    tree = cKDTree(centers)
-    pairs = tree.query_pairs(r=2*radius_px)
+    # Normalize radii
+    if isinstance(radius_px, (int, float)):
+        radii = [radius_px] * n
+    else:
+        radii = radius_px
 
-    overlapped = set(i for pair in pairs for i in pair)
-    return len(centers) - len(overlapped)
+    # Build adjacency list (direct overlaps only)
+    graph = {i: set() for i in range(n)}
+
+    def overlaps(i, j):
+        x1, y1 = centers[i]
+        x2, y2 = centers[j]
+        r1, r2 = radii[i], radii[j]
+
+        dx = x2 - x1
+        dy = y2 - y1
+
+        return dx * dx + dy * dy <= (r1 + r2) ** 2
+
+    # Create edges only for direct overlaps
+    for i in range(n):
+        for j in range(i + 1, n):
+            if overlaps(i, j):
+                graph[i].add(j)
+                graph[j].add(i)
+
+    # DFS to count components (isolated nodes included)
+    visited = set()
+    groups = 0
+
+    for i in range(n):
+        if i not in visited:
+            groups += 1
+            stack = [i]
+
+            while stack:
+                node = stack.pop()
+                if node in visited:
+                    continue
+                visited.add(node)
+                for nei in graph[node]:
+                    if nei not in visited:
+                        stack.append(nei)
+
+    return groups
 
 def measure_lumin(aperture, N, radius_px, data, criteria):
     mask = np.zeros((N, N), dtype=np.uint8)
@@ -168,7 +160,7 @@ def measure_lumin(aperture, N, radius_px, data, criteria):
     return sum(sum(aperture_lumin)), bright_aperture
 
 
-def simulate_sne(rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist='exp', scale_height_pc = 100, step_pc=1.5, visualize=False):
+def simulate_sne(rate, radius_pc, lumin_range, criteria, FOV = 200, N=500, dist='exp', scale_height_pc = 100, step_pc=10, A=40, alpha=-4/9, beta = -2.19, visualize=False):
     '''
     Aperture radius in parsecs
     FOV in parsecs
@@ -184,17 +176,19 @@ def simulate_sne(rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist
 
     ### Simulate the population
     pop = SNe_pop(rate)
-    pop.luminosities(lumin_range)
-    pop.diameter()
+    pop.luminosities(lumin_range, beta = beta)
+    pop.diameter(A=A, alpha = alpha)
     pop.position(N, scale_height_px, dist = 'exp')
 
     ### Make the data
     data = sum((pop.make_data)(x, N, px) for x in range(pop.n))
 
     if visualize: ### A quick visual
+        fig = plt.figure(figsize=(8,8))
         plt.imshow(data, norm=colors.LogNorm(vmin=min(pop.lumin)/1000, vmax=max(pop.lumin), clip=True), cmap='hot', extent=[-N/20, N/20, -N/20, N/20])
         plt.colorbar(label='Luminosity')
         plt.title('Simulated SNe/SNR population')
+        fig.savefig('./Simulated_pop.png', bbox_inches='tight')
 
     ### Add apertures and measure luminosities for each
     apertures = aperture_pos(N,N, int(radius_px), step_px=int(step_px))
@@ -205,19 +199,20 @@ def simulate_sne(rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist
     ### Determine how many (if any) of the apertures were overlapping, subtract those from the total count
     count = check_overlap(bright_apertures, radius_px) 
 
-    return total_lumin, count, pop
+    return total_lumin, count, len(apertures), pop
 
 
-def run_mc(iterations, n_jobs, rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist='exp', scale_height_pc = 100, step_pc=1.5, visualize=False):
+def run_mc(iterations, n_jobs, rate, radius_pc, lumin_range, criteria, FOV = 200, N=2000, dist='exp', scale_height_pc = 100, step_pc=10, visualize=False):
     ''
     ''
-    results = Parallel(n_jobs=n_jobs)(delayed(simulate_sne)(rate=2, radius_pc = 10, lumin_range=lumin_range, criteria=1e4, FOV=200, N=500,
-                                                        dist='exp', scale_height_pc=100, step_pc=5, visualize=False) for x in range(iterations))
+    results = Parallel(n_jobs=n_jobs)(delayed(simulate_sne)(rate=rate, radius_pc = radius_pc, lumin_range=lumin_range, criteria=criteria, FOV=FOV, N=N, dist='exp', scale_height_pc=scale_height_pc, step_pc=step_pc, visualize=False) for x in range(iterations))
+    
     total_luminosities = [item[0] for item in results]
     count = [item[1] for item in results]
-    population = [item[2] for item in results]
+    apertures = [item[2] for item in results]
+    population = [item[3] for item in results]
 
     total_luminosities_cat = np.concatenate(total_luminosities)
-    return total_luminosities_cat, count, population
+    return total_luminosities_cat, count, apertures, population
 
         
